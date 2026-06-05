@@ -1,0 +1,11 @@
+{
+    "dev_mode": true,
+    "enabled": true,
+    "hotkey_enabled": false,
+    "hotkey_key": 0,
+    "melee_speed": 1.0,
+    "reload_speed": 1.0,
+    "reload_use_native_speed": true,
+    "run_speed": 1.0,
+    "walk_speed": 1.0
+}

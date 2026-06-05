@@ -1,0 +1,23 @@
+{
+    "enabled": true,
+    "max_feed": 50,
+    "regions": {
+        "Arm": {
+            "damage": 1.0,
+            "stagger": 1.0
+        },
+        "Head": {
+            "damage": 2.0,
+            "stagger": 3.0
+        },
+        "Leg": {
+            "damage": 1.0,
+            "stagger": 1.5
+        },
+        "Torso": {
+            "damage": 1.0,
+            "stagger": 1.0
+        }
+    },
+    "trace_all_hits": true
+}
