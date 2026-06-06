@@ -4,17 +4,14 @@
 local mod_name = "More Ammo RE2"
 local config_path = "more_ammo_re2.json"
 local error_path = "more_ammo_re2_error.txt"
-local craft_report_path = "more_ammo_re2_craft_report.txt"
 
 local cfg = {
     enabled = true,
     pickup_enabled = true,
     craft_enabled = false,
-    multiplier = 2.0,
     pickup_multiplier = 2.0,
     craft_multiplier = 2.0,
     extended_range = false,
-    direct_grant_enabled = false,
     dev_mode = false,
 }
 
@@ -22,19 +19,7 @@ local min_multiplier = 0.1
 
 local state = {
     hook_installed = false,
-    hook_name = "?",
     install_error = nil,
-    add_hits = 0,
-    ammo_hits = 0,
-    extra_grants = 0,
-    suppressed_hits = 0,
-    stock_route_hits = 0,
-    stock_patches = 0,
-    pickup_patches = 0,
-    craft_patches = 0,
-    craft_hook_hits = 0,
-    craft_output_hits = 0,
-    craft_extra_grants = 0,
     last_item = "?",
     last_count = 0,
     last_extra = 0,
@@ -43,7 +28,6 @@ local state = {
     last_error = nil,
     hooks = {},
     craft_frames = {},
-    craft_events = {},
 }
 
 local ammo_items = {
@@ -57,15 +41,6 @@ local ammo_items = {
     [25] = "Fuel",
     [26] = "Large-caliber Handgun Ammo",
     [27] = "High-Powered Rounds",
-}
-
-local method_names = {
-    "addItemCount(app.ropeway.gamemastering.Item.ID, System.Int32)",
-    "addItemCount(app.ropeway.gamemastering.Item.ID,System.Int32)",
-    "addItemCount121818",
-    "addItemCount160362",
-    "addItemCount121840",
-    "addItemCount",
 }
 
 local stock_method_names = {
@@ -170,8 +145,6 @@ local craft_boundary_methods = {
     },
 }
 
-local suppress_hook = false
-local pending_grant = nil
 local patched_objects = {}
 local patched_order = {}
 
@@ -222,7 +195,7 @@ local function normalize_multiplier(value, fallback)
     return quantize_multiplier(clamp_number(value, min_multiplier, multiplier_max(), fallback))
 end
 
--- Format multiplier compactly for UI/report text.
+-- Format multiplier compactly for UI text.
 local function multiplier_text(value)
     return string.format("%.1f", normalize_multiplier(value, 1.0))
 end
@@ -234,11 +207,8 @@ local function normalize_config()
     cfg.craft_enabled = cfg.craft_enabled == true
     cfg.extended_range = cfg.extended_range == true
     cfg.dev_mode = cfg.dev_mode == true
-    cfg.direct_grant_enabled = false
-    cfg.multiplier = normalize_multiplier(cfg.multiplier, 2.0)
-    cfg.pickup_multiplier = normalize_multiplier(cfg.pickup_multiplier, cfg.multiplier)
-    cfg.craft_multiplier = normalize_multiplier(cfg.craft_multiplier, cfg.multiplier)
-    cfg.multiplier = cfg.pickup_multiplier
+    cfg.pickup_multiplier = normalize_multiplier(cfg.pickup_multiplier, 2.0)
+    cfg.craft_multiplier = normalize_multiplier(cfg.craft_multiplier, 2.0)
 end
 
 -- Load user settings from REFramework data folder.
@@ -248,8 +218,6 @@ local function load_config()
         for k, v in pairs(data) do
             if cfg[k] ~= nil then cfg[k] = v end
         end
-        if data.pickup_multiplier == nil and data.multiplier ~= nil then cfg.pickup_multiplier = data.multiplier end
-        if data.craft_multiplier == nil and data.multiplier ~= nil then cfg.craft_multiplier = data.multiplier end
     end
     normalize_config()
 end
@@ -396,11 +364,6 @@ local function is_ammo(item_id)
     return ammo_items[tonumber(item_id or 0)] ~= nil
 end
 
--- Return route kind from known RE2 stock entry point.
-local function route_kind(source)
-    return "pickup"
-end
-
 -- Return route multiplier after enabled checks.
 local function route_multiplier(kind)
     if kind == "craft" then
@@ -411,9 +374,9 @@ local function route_multiplier(kind)
     return clamp_number(cfg.pickup_multiplier, min_multiplier, multiplier_max(), 1.0)
 end
 
--- Craft hooks observe in Dev Mode even when multiplier is off.
+-- Craft hooks run only when craft multiplier is enabled.
 local function craft_observe_enabled()
-    return cfg.enabled == true and (cfg.craft_enabled == true or cfg.dev_mode == true)
+    return cfg.enabled == true and cfg.craft_enabled == true
 end
 
 -- Read StockItem item id through native getter names.
@@ -430,7 +393,7 @@ local function read_stock_count(stock)
     return count
 end
 
--- Return InventoryManager singleton for snapshot and extra craft grant.
+-- Return InventoryManager singleton for craft inventory snapshots.
 local function inventory_manager()
     if sdk == nil or type(sdk.get_managed_singleton) ~= "function" then return nil end
     local ok, inv = pcall(sdk.get_managed_singleton, "app.ropeway.gamemastering.InventoryManager")
@@ -531,39 +494,8 @@ local function snapshot_diff(before, after)
     return rows
 end
 
--- Keep bounded craft evidence for reports.
-local function push_craft_event(event)
-    event = type(event) == "table" and event or { note = tostring(event or "") }
-    state.craft_events[#state.craft_events + 1] = event
-    while #state.craft_events > 40 do table.remove(state.craft_events, 1) end
-end
-
--- Write craft report for user copy/paste.
-local function write_craft_report(reason)
-    local lines = {
-        "More Ammo RE2 craft report",
-        "reason=" .. tostring(reason or "manual"),
-        "enabled=" .. tostring(cfg.enabled),
-        "pickup_enabled=" .. tostring(cfg.pickup_enabled),
-        "pickup_multiplier=" .. multiplier_text(cfg.pickup_multiplier),
-        "craft_enabled=" .. tostring(cfg.craft_enabled),
-        "craft_multiplier=" .. multiplier_text(cfg.craft_multiplier),
-        "craft_hook_hits=" .. tostring(state.craft_hook_hits),
-        "craft_output_hits=" .. tostring(state.craft_output_hits),
-        "craft_extra_grants=" .. tostring(state.craft_extra_grants),
-        "last_error=" .. tostring(state.last_error or "none"),
-        "note=" .. (cfg.craft_enabled == true and "craft multiplier active" or "craft multiplier OFF; no extra craft ammo will be granted"),
-        "",
-        "events:",
-    }
-    for _, event in ipairs(state.craft_events) do
-        lines[#lines + 1] = tostring(event.label or "?") .. " base=" .. tostring(event.base or "?") .. " extra=" .. tostring(event.extra or "?") .. " via=" .. tostring(event.route or "?") .. " diff=" .. tostring(event.diff or "?") .. " slot=" .. tostring(event.slot or "?") .. " final=" .. tostring(event.final or "?")
-    end
-    write_lines(craft_report_path, lines)
-end
-
 -- Set ammo primitive count when StockItem wraps PrimitiveItem data.
-local function patch_primitive_count(obj, item_id, new_count, source)
+local function patch_primitive_count(obj, item_id, new_count)
     if obj == nil then return false end
     local wid = field_int(obj, { "WeaponId", "WeaponID", "_WeaponId", "_WeaponID", "Type", "_Type", "ItemId", "ItemID" })
     if wid ~= nil and is_ammo(wid) then item_id = wid end
@@ -578,7 +510,7 @@ end
 -- Patch StockItem count before RE2 accepts pickup/craft stock.
 local function patch_stock_count(stock, source)
     if cfg.enabled ~= true or stock == nil then return false end
-    local kind = route_kind(source)
+    local kind = "pickup"
     local multiplier = route_multiplier(kind)
     if multiplier == nil then return false end
     local item_id = read_stock_item_id(stock)
@@ -596,38 +528,7 @@ local function patch_stock_count(stock, source)
     local additional_obj = nil
     pcall(function() default_obj = stock:get_field("DefaultItem") end)
     pcall(function() additional_obj = stock:get_field("AdditionalItem") end)
-    local primitive_ok = patch_primitive_count(default_obj, item_id, new_count, source) or patch_primitive_count(additional_obj, item_id, new_count, source)
-
-    if primitive_ok then
-        state.stock_patches = state.stock_patches + 1
-        if kind == "craft" then
-            state.craft_patches = state.craft_patches + 1
-        else
-            state.pickup_patches = state.pickup_patches + 1
-        end
-        return true
-    end
-    return false
-end
-
--- Calculate extra count to add after native grant.
-local function extra_count(base_count)
-    local base = math.max(0, math.floor(tonumber(base_count or 0) or 0))
-    local mult = clamp_number(cfg.pickup_multiplier, min_multiplier, multiplier_max(), 1.0)
-    return math.max(0, math.ceil(base * mult) - base)
-end
-
--- Call native addItemCount with enum arg first, numeric fallback second.
-local function call_extra_grant(grant)
-    local ok = pcall(function()
-        grant.inventory:call(grant.method_name, grant.item_arg, grant.extra)
-    end)
-    if ok then return true, nil end
-    local ok_numeric, numeric_err = pcall(function()
-        grant.inventory:call(grant.method_name, grant.item_id, grant.extra)
-    end)
-    if ok_numeric then return true, nil end
-    return false, numeric_err
+    return patch_primitive_count(default_obj, item_id, new_count) or patch_primitive_count(additional_obj, item_id, new_count)
 end
 
 -- Calculate desired crafted ammo output from native output count.
@@ -657,16 +558,12 @@ local function apply_craft_diff(frame, after)
         if has_craft_input == true and is_ammo(item_id) and base > 0 then
             local desired = craft_target_count(base)
             local adjustment = desired - base
-            state.craft_output_hits = state.craft_output_hits + 1
             state.last_route = tostring(frame.route or "craft")
             state.last_kind = "craft"
             state.last_item = item_label(item_id)
             state.last_count = base
             state.last_extra = adjustment
-            if cfg.craft_enabled ~= true then
-                push_craft_event({ route = frame.route, item_id = item_id, label = item_label(item_id), base = base, extra = 0, diff = "craft_disabled" })
-                return false
-            end
+            if cfg.craft_enabled ~= true then return false end
             if adjustment ~= 0 then
                 local target = crafted_output_slot(frame.before, after, item_id)
                 local ok, err = false, "crafted_output_slot_missing"
@@ -674,18 +571,13 @@ local function apply_craft_diff(frame, after)
                     ok, err = set_slot_count(target.slot, target.after_count + adjustment)
                 end
                 if ok then
-                    state.craft_patches = state.craft_patches + 1
-                    state.craft_extra_grants = state.craft_extra_grants + 1
                     applied = true
-                    push_craft_event({ route = frame.route, item_id = item_id, label = item_label(item_id), base = base, extra = adjustment, diff = "slot_set", slot = target and target.slot, final = target and (target.after_count + adjustment) })
                 else
                     record_error("craft_slot_set", err)
-                    push_craft_event({ route = frame.route, item_id = item_id, label = item_label(item_id), base = base, extra = adjustment, diff = "slot_set_failed" })
                 end
             end
         end
     end
-    if applied then write_craft_report("craft_apply") end
     return applied
 end
 
@@ -703,7 +595,6 @@ local function install_stock_route(route)
     end
     sdk.hook(method, function(args)
         local ok, err = pcall(function()
-            state.stock_route_hits = state.stock_route_hits + 1
             local stock = route.stock_arg ~= nil and managed_object(args[route.stock_arg]) or nil
             patch_stock_count(stock, route.label)
         end)
@@ -731,7 +622,6 @@ local function install_craft_route(route)
     sdk.hook(method, function(args)
         local ok, err = pcall(function()
             if craft_observe_enabled() ~= true then return end
-            state.craft_hook_hits = state.craft_hook_hits + 1
             state.craft_frames[#state.craft_frames + 1] = { route = route.label, before = inventory_snapshot(route.label .. "_pre") }
         end)
         if not ok then record_error("craft_pre:" .. tostring(route.label), err) end
@@ -751,113 +641,34 @@ local function install_craft_route(route)
     return true
 end
 
--- Install addItemCount hook because this is RE2 direct ammo grant path.
+-- Install pickup and craft hooks once.
 local function install_hook()
     if state.hook_installed then return true end
-    local type_def = sdk.find_type_definition("app.ropeway.gamemastering.InventoryManager")
-    if type_def == nil then
-        state.install_error = "InventoryManager type missing"
-        return false
-    end
-    local method, name = find_method(type_def, method_names)
-    if method == nil then
-        state.install_error = "addItemCount method missing"
-        return false
-    end
-
-    sdk.hook(method, function(args)
-        local ok, err = pcall(function()
-            state.add_hits = state.add_hits + 1
-            if suppress_hook then
-                state.suppressed_hits = state.suppressed_hits + 1
-                pending_grant = nil
-                return
-            end
-
-            pending_grant = nil
-            local item_id = scalar_int(args[3])
-            local count = scalar_int(args[4])
-            state.last_item = item_label(item_id)
-            state.last_count = count or 0
-            state.last_extra = 0
-
-            if cfg.enabled ~= true or cfg.direct_grant_enabled ~= true or item_id == nil or count == nil or count <= 0 then return end
-            if not is_ammo(item_id) then return end
-
-            local extra = extra_count(count)
-            state.ammo_hits = state.ammo_hits + 1
-            state.last_extra = extra
-            if extra <= 0 then return end
-
-            pending_grant = {
-                inventory = managed_object(args[2]),
-                item_arg = args[3],
-                item_id = item_id,
-                extra = extra,
-                method_name = name,
-            }
-        end)
-        if not ok then record_error("addItemCount_pre", err) end
-        return nil
-    end, function(retval)
-        local ok, err = pcall(function()
-            local grant = pending_grant
-            pending_grant = nil
-            if grant == nil or grant.inventory == nil or grant.extra <= 0 then return end
-
-            suppress_hook = true
-            local grant_ok, grant_err = call_extra_grant(grant)
-            suppress_hook = false
-
-            if grant_ok then
-                state.extra_grants = state.extra_grants + 1
-                state.last_error = nil
-            else
-                record_error("addItemCount_post_grant", grant_err)
-            end
-        end)
-        suppress_hook = false
-        if not ok then record_error("addItemCount_post", err) end
-        return retval
-    end)
-
+    local installed = 0
     state.hook_installed = true
-    state.hook_name = name
     state.install_error = nil
-    state.hooks.addItemCount = name
     for _, route in ipairs(stock_route_methods) do
-        install_stock_route(route)
+        if install_stock_route(route) then installed = installed + 1 end
     end
     for _, route in ipairs(craft_boundary_methods) do
-        install_craft_route(route)
+        if install_craft_route(route) then installed = installed + 1 end
+    end
+    if installed <= 0 then
+        state.install_error = "no hooks installed"
+        state.hook_installed = false
+        return false
     end
     return true
 end
 
 -- Draw diagnostics only when Dev Mode is enabled.
 local function draw_dev()
-    imgui.text("Hook: " .. tostring(state.hook_installed and state.hook_name or "not installed"))
+    imgui.text("Hooks: " .. tostring(state.hook_installed and "installed" or "not installed"))
     if state.install_error ~= nil then imgui.text("Error: " .. tostring(state.install_error)) end
     imgui.text("Last: " .. tostring(state.last_item) .. " +" .. tostring(state.last_count) .. " extra " .. tostring(state.last_extra) .. " via " .. tostring(state.last_route) .. " kind=" .. tostring(state.last_kind))
     if imgui.button("Retry Hook Install") then install_hook() end
     imgui.same_line()
     if imgui.button("Save Config") then save_config() end
-    local changed
-    imgui.text("Direct addItemCount Mutator: disabled")
-    imgui.text("addItemCount hits: " .. tostring(state.add_hits))
-    imgui.text("Ammo hits: " .. tostring(state.ammo_hits))
-    imgui.text("Extra grants: " .. tostring(state.extra_grants))
-    imgui.text("Suppressed hits: " .. tostring(state.suppressed_hits))
-    imgui.text("Stock route hits: " .. tostring(state.stock_route_hits))
-    imgui.text("Stock patches: " .. tostring(state.stock_patches))
-    imgui.text("Pickup patches: " .. tostring(state.pickup_patches))
-    imgui.text("Craft patches: " .. tostring(state.craft_patches))
-    imgui.text("Craft hook hits: " .. tostring(state.craft_hook_hits))
-    imgui.text("Craft output hits: " .. tostring(state.craft_output_hits))
-    imgui.text("Craft extra grants: " .. tostring(state.craft_extra_grants))
-    if imgui.button("Write Craft Report") then write_craft_report("manual") end
-    imgui.same_line()
-    imgui.text(craft_report_path)
     for label, hook_name in pairs(state.hooks) do
         imgui.text(tostring(label) .. ": " .. tostring(hook_name))
     end
